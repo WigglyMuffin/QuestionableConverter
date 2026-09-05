@@ -1,0 +1,296 @@
+# ===========================================================================
+# Auto Release on Version Bump (single public repo)
+# ===========================================================================
+# Triggers when the .csproj version changes on push to main.
+# Builds the plugin and creates the GitHub release in this repo. Single public
+# repo: no mirror dispatch (the WigglyCorp private-repo template minus that step).
+# ===========================================================================
+
+name: Auto Release on Version Bump
+
+# ============================================================================
+# Plugin Configuration - edit these for your plugin
+# ============================================================================
+env:
+  PLUGIN_NAME: "Questionable"                     # Display name of the plugin
+  PROJECT_PATH: "QuestionableConverter/QuestionableConverter.csproj"  # Path to the .csproj file
+  VERSION_SOURCE: "Directory.Build.targets"                            # File to read version from (leave empty to use PROJECT_PATH)
+  DOTNET_VERSION: "10.0.x"                      # .NET SDK version
+  TARGET_FRAMEWORK: "net10.0-windows"           # Target framework moniker
+  DALAMUD_CHANNEL: "stg"                     # Dalamud channel (stable/stg)
+  USE_SUBMODULES: "true"                        # Whether to init git submodules
+  STRIP_PDB: "true"                             # Strip debug symbols from release
+  OUTPUT_DIR: ""                               # Build output path: "" (auto-detect), "dist", or "bin/Release"
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Directory.Build.targets'               # Must match VERSION_SOURCE
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force create release even if tag exists'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  detect-version-change:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      should-release: ${{ steps.check-release.outputs.should-release }}
+      tag-exists: ${{ steps.check-tag.outputs.exists }}
+      auto-release: ${{ steps.check-auto-release.outputs.auto-release }}
+    steps:
+      - name: Check auto-release enabled
+        id: check-auto-release
+        run: |
+          # Manual workflow_dispatch always proceeds (user explicitly triggered it)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "auto-release=true" >> $GITHUB_OUTPUT
+            echo "Manual dispatch - skipping auto-release check"
+            exit 0
+          fi
+
+          # Check WigglyPanel for auto-release setting (fail-closed: skip if check fails)
+          RESPONSE=$(curl -sf "https://wigglypanel-api.wigglymuffin.workers.dev/auto-release/${{ env.PLUGIN_NAME }}" 2>/dev/null || echo '{"autoRelease":false}')
+          AUTO_RELEASE=$(echo "$RESPONSE" | jq -r '.autoRelease // false')
+          echo "auto-release=$AUTO_RELEASE" >> $GITHUB_OUTPUT
+          if [ "$AUTO_RELEASE" = "false" ]; then
+            echo "Auto-release is disabled for ${{ env.PLUGIN_NAME }}, skipping"
+          else
+            echo "Auto-release is enabled for ${{ env.PLUGIN_NAME }}"
+          fi
+
+      - name: Checkout repository
+        if: steps.check-auto-release.outputs.auto-release != 'false'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        if: steps.check-auto-release.outputs.auto-release != 'false'
+        id: get-version
+        run: |
+          SOURCE="${{ env.VERSION_SOURCE || env.PROJECT_PATH }}"
+
+          # Extract version using xmllint for more reliable parsing
+          if command -v xmllint >/dev/null 2>&1; then
+            VERSION=$(xmllint --xpath "string(//PropertyGroup/Version)" "$SOURCE" 2>/dev/null || true)
+          fi
+
+          # Fallback to grep if xmllint fails or is not available
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep -oP '<Version>\K[^<]+' "$SOURCE" | head -1)
+          fi
+
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from $SOURCE"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if tag already exists
+        if: steps.check-auto-release.outputs.auto-release != 'false'
+        id: check-tag
+        run: |
+          TAG="v${{ steps.get-version.outputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG does not exist"
+          fi
+
+      - name: Determine if release should be created
+        if: steps.check-auto-release.outputs.auto-release != 'false'
+        id: check-release
+        run: |
+          FORCE_RELEASE="${{ github.event.inputs.force_release }}"
+          TAG_EXISTS="${{ steps.check-tag.outputs.exists }}"
+
+          if [ "$FORCE_RELEASE" = "true" ] || [ "$TAG_EXISTS" = "false" ]; then
+            echo "should-release=true" >> $GITHUB_OUTPUT
+            echo "Will create release"
+          else
+            echo "should-release=false" >> $GITHUB_OUTPUT
+            echo "Will not create release (tag exists and not forced)"
+          fi
+
+  build-and-release:
+    needs: detect-version-change
+    if: needs.detect-version-change.outputs.should-release == 'true' && needs.detect-version-change.outputs.auto-release != 'false'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.detect-version-change.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Configure git credentials for submodules
+        if: env.USE_SUBMODULES == 'true'
+        run: |
+          git config --global url."https://${{ secrets.PLUGIN_PAT }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Checkout submodules
+        if: env.USE_SUBMODULES == 'true'
+        run: |
+          git submodule update --init --recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Download and setup Dalamud
+        run: |
+          CHANNEL="${{ env.DALAMUD_CHANNEL }}"
+          if [ "$CHANNEL" = "stable" ]; then
+            URL="https://goatcorp.github.io/dalamud-distrib/latest.zip"
+          else
+            URL="https://goatcorp.github.io/dalamud-distrib/${CHANNEL}/latest.zip"
+          fi
+          echo "Downloading Dalamud from $URL..."
+          curl -fsSL "$URL" -o dalamud.zip
+          unzip -q dalamud.zip -d .dalamud
+          if [ ! -f ".dalamud/Dalamud.dll" ]; then
+            echo "Error: Dalamud download failed - Dalamud.dll not found"
+            exit 1
+          fi
+          echo "DALAMUD_HOME=$PWD/.dalamud/" >> $GITHUB_ENV
+
+      - name: Restore NuGet packages
+        run: |
+          dotnet restore /p:Configuration=Release --packages .nuget
+
+      - name: Build plugin
+        run: |
+          echo "Building ${{ env.PLUGIN_NAME }}..."
+          BUILD_ARGS="-c Release -f ${{ env.TARGET_FRAMEWORK }} -p:DalamudLibPath=$DALAMUD_HOME -maxcpucount:1 --source $PWD/.nuget --no-restore --verbosity minimal"
+          if [ "${{ env.STRIP_PDB }}" = "true" ]; then
+            BUILD_ARGS="$BUILD_ARGS -p:DebugType=none -p:DebugSymbols=false -p:CopyDebugSymbolFilesFromPackages=false -p:IncludeSymbols=false"
+          fi
+          dotnet build "${{ env.PROJECT_PATH }}" $BUILD_ARGS
+
+      - name: Resolve build output directory
+        run: |
+          PROJECT_DIR=$(dirname "${{ env.PROJECT_PATH }}")
+          if [ -n "${{ env.OUTPUT_DIR }}" ]; then
+            RESOLVED="${PROJECT_DIR}/${{ env.OUTPUT_DIR }}/${{ env.PLUGIN_NAME }}"
+          else
+            # Auto-detect: check dist/ first (custom DalamudPackager), then bin/Release/ (default)
+            if [ -d "${PROJECT_DIR}/dist/${{ env.PLUGIN_NAME }}" ]; then
+              RESOLVED="${PROJECT_DIR}/dist/${{ env.PLUGIN_NAME }}"
+            elif [ -d "${PROJECT_DIR}/bin/Release/${{ env.PLUGIN_NAME }}" ]; then
+              RESOLVED="${PROJECT_DIR}/bin/Release/${{ env.PLUGIN_NAME }}"
+            else
+              echo "Error: Could not find build output in dist/ or bin/Release/"
+              find "$PROJECT_DIR" -name "latest.zip" -type f 2>/dev/null || echo "No latest.zip found anywhere"
+              exit 1
+            fi
+          fi
+          echo "RESOLVED_DIST_DIR=${RESOLVED}" >> $GITHUB_ENV
+          echo "Build output directory: ${RESOLVED}"
+
+      - name: Strip debug symbols from zip
+        if: env.STRIP_PDB == 'true'
+        run: |
+          ZIP_PATH="${RESOLVED_DIST_DIR}/latest.zip"
+          if [ -f "$ZIP_PATH" ]; then
+            TEMP_DIR=$(mktemp -d)
+            unzip -q "$ZIP_PATH" -d "$TEMP_DIR"
+            find "$TEMP_DIR" -name "*.pdb" -type f -delete
+            cd "$TEMP_DIR"
+            zip -q -r "$OLDPWD/$ZIP_PATH" .
+            cd "$OLDPWD"
+            rm -rf "$TEMP_DIR"
+            if unzip -l "$ZIP_PATH" | grep -q "\.pdb$"; then
+              echo "Warning: .pdb files still present in zip!"
+            else
+              echo "Successfully stripped all debug symbols from latest.zip"
+            fi
+          else
+            echo "Error: $ZIP_PATH not found"
+            exit 1
+          fi
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release
+          if [ -f "${RESOLVED_DIST_DIR}/latest.zip" ]; then
+            cp "${RESOLVED_DIST_DIR}/latest.zip" "release/latest.zip"
+          else
+            echo "Error: latest.zip not found"
+            exit 1
+          fi
+          if [ -f "${RESOLVED_DIST_DIR}/${{ env.PLUGIN_NAME }}.json" ]; then
+            cp "${RESOLVED_DIST_DIR}/${{ env.PLUGIN_NAME }}.json" "release/${{ env.PLUGIN_NAME }}.json"
+          else
+            echo "Warning: ${{ env.PLUGIN_NAME }}.json not found"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${VERSION}"
+
+          # Refuse to overwrite an existing release (preserves download counts)
+          if gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' &>/dev/null; then
+            echo "::error::Release ${TAG} already exists. Cannot overwrite an existing release as this would reset download counts. Please bump the version in your .csproj."
+            exit 1
+          fi
+
+          # Determine if this version should be marked as Latest
+          LATEST_FLAG=""
+          CURRENT_LATEST=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name // ""' 2>/dev/null || echo "")
+          if [ -n "$CURRENT_LATEST" ]; then
+            NEW_VER="${TAG#v}"; NEW_VER="${NEW_VER%%-*}"
+            CUR_VER="${CURRENT_LATEST#v}"; CUR_VER="${CUR_VER%%-*}"
+            IFS='.' read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VER"
+            IFS='.' read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$CUR_VER"
+            NEW_MAJOR=${NEW_MAJOR:-0}; NEW_MINOR=${NEW_MINOR:-0}; NEW_PATCH=${NEW_PATCH:-0}
+            CUR_MAJOR=${CUR_MAJOR:-0}; CUR_MINOR=${CUR_MINOR:-0}; CUR_PATCH=${CUR_PATCH:-0}
+            if [ "$NEW_MAJOR" -lt "$CUR_MAJOR" ] || \
+               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -lt "$CUR_MINOR" ]) || \
+               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -eq "$CUR_MINOR" ] && [ "$NEW_PATCH" -le "$CUR_PATCH" ]); then
+              LATEST_FLAG="--latest=false"
+              echo "Version $TAG is not higher than current latest $CURRENT_LATEST, will not mark as latest"
+            fi
+          fi
+
+          gh release create "v${VERSION}" \
+            --title "${{ env.PLUGIN_NAME }} v${VERSION}" \
+            --notes "## ${{ env.PLUGIN_NAME }} v${VERSION}
+
+          This release was automatically created following a version bump.
+
+          ### Installation Files
+          - \`latest.zip\` - **Plugin archive for installation**
+          - \`${{ env.PLUGIN_NAME }}.json\` - Plugin manifest
+
+          Please download the \`latest.zip\` file to install or update the plugin." \
+            --target "$(git rev-parse HEAD)" \
+            --repo ${{ github.repository }} \
+            $LATEST_FLAG \
+            release/latest.zip \
+            release/${{ env.PLUGIN_NAME }}.json
+

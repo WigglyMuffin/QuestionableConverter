@@ -1,0 +1,324 @@
+# ===========================================================================
+# Panel Release (single public repo)
+# ===========================================================================
+# Handles WigglyPanel dispatch actions: testing, stable, revert.
+# Builds from source and creates releases in this repo (single public repo, no mirror).
+# Promote is handled directly by WigglyPanel (flips prerelease flag via API).
+# ===========================================================================
+
+name: Panel Release
+
+# ============================================================================
+# Plugin Configuration - edit these for your plugin
+# ============================================================================
+env:
+  PLUGIN_NAME: "Questionable"                     # Display name of the plugin
+  PROJECT_PATH: "QuestionableConverter/QuestionableConverter.csproj"  # Path to the .csproj file
+  DOTNET_VERSION: "10.0.x"                      # .NET SDK version
+  TARGET_FRAMEWORK: "net10.0-windows"           # Target framework moniker
+  DALAMUD_CHANNEL: "stg"                     # Dalamud channel (stable/stg)
+  USE_SUBMODULES: "true"                        # Whether to init git submodules
+  STRIP_PDB: "true"                             # Strip debug symbols from release
+  OUTPUT_DIR: ""                               # Build output path: "" (auto-detect), "dist", or "bin/Release"
+
+# Triggered by WigglyPanel via repository_dispatch
+# Payload: { "version": "1.2.3", "ref": "main" }
+on:
+  repository_dispatch:
+    types: [testing-release, stable-release, revert-release]
+
+permissions:
+  contents: write
+
+jobs:
+  # ================================================================
+  # Revert: re-publish an older release under a new higher version
+  # ================================================================
+  revert:
+    if: github.event.action == 'revert-release'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.client_payload.version }}
+      REVERT_TO: ${{ github.event.client_payload.revert_to_tag }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "$VERSION" ]; then
+            echo "Error: version is required in client_payload"
+            exit 1
+          fi
+          if [ -z "$REVERT_TO" ]; then
+            echo "Error: revert_to_tag is required in client_payload"
+            exit 1
+          fi
+          echo "Reverting to ${REVERT_TO}, re-publishing as v${VERSION}"
+
+      - name: Checkout for tag operations
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts from old release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release
+
+          # Try both tag formats: v7.4.0 and 7.4.0
+          REVERT_TAG="${REVERT_TO}"
+          if ! gh release view "${REVERT_TAG}" --repo ${{ github.repository }} &>/dev/null; then
+            REVERT_TAG="v${REVERT_TO}"
+          fi
+          if ! gh release view "${REVERT_TAG}" --repo ${{ github.repository }} &>/dev/null; then
+            echo "Error: Could not find release for ${REVERT_TO} or v${REVERT_TO}"
+            exit 1
+          fi
+
+          echo "Downloading artifacts from release ${REVERT_TAG}..."
+          gh release download "${REVERT_TAG}" --repo ${{ github.repository }} --dir release
+
+          echo "Downloaded artifacts:"
+          ls -la release/
+
+          # Verify latest.zip exists
+          if [ ! -f "release/latest.zip" ]; then
+            echo "Error: latest.zip not found in release ${REVERT_TAG}"
+            exit 1
+          fi
+
+      - name: Create revert release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ github.event.client_payload.changelog }}
+        run: |
+          TAG="v${VERSION}"
+
+          # Refuse to overwrite an existing release (preserves download counts)
+          if gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' &>/dev/null; then
+            echo "::error::Release ${TAG} already exists. Cannot overwrite an existing release as this would reset download counts. Please use a higher version number."
+            exit 1
+          fi
+
+          # Determine if this version should be marked as Latest
+          LATEST_FLAG=""
+          CURRENT_LATEST=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name // ""' 2>/dev/null || echo "")
+          if [ -n "$CURRENT_LATEST" ]; then
+            NEW_VER="${TAG#v}"; NEW_VER="${NEW_VER%%-*}"
+            CUR_VER="${CURRENT_LATEST#v}"; CUR_VER="${CUR_VER%%-*}"
+            IFS='.' read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VER"
+            IFS='.' read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$CUR_VER"
+            NEW_MAJOR=${NEW_MAJOR:-0}; NEW_MINOR=${NEW_MINOR:-0}; NEW_PATCH=${NEW_PATCH:-0}
+            CUR_MAJOR=${CUR_MAJOR:-0}; CUR_MINOR=${CUR_MINOR:-0}; CUR_PATCH=${CUR_PATCH:-0}
+            if [ "$NEW_MAJOR" -lt "$CUR_MAJOR" ] || \
+               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -lt "$CUR_MINOR" ]) || \
+               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -eq "$CUR_MINOR" ] && [ "$NEW_PATCH" -le "$CUR_PATCH" ]); then
+              LATEST_FLAG="--latest=false"
+              echo "Version $TAG is not higher than current latest $CURRENT_LATEST, will not mark as latest"
+            fi
+          fi
+
+          NOTES="## ${{ env.PLUGIN_NAME }} v${VERSION}
+
+          Reverted to release ${REVERT_TO}.
+
+          ${CHANGELOG}
+
+          ### Installation Files
+          - \`latest.zip\` - **Plugin archive for installation**
+          - \`${{ env.PLUGIN_NAME }}.json\` - Plugin manifest"
+
+          ARTIFACTS=""
+          for f in release/*; do
+            [ -f "$f" ] && ARTIFACTS="$ARTIFACTS $f"
+          done
+
+          gh release create "$TAG" \
+            --title "${{ env.PLUGIN_NAME }} v${VERSION}" \
+            --notes "$NOTES" \
+            --target "$(git rev-parse HEAD)" \
+            --repo ${{ github.repository }} \
+            $LATEST_FLAG \
+            $ARTIFACTS
+
+  # ================================================================
+  # Build and release: testing (pre-release) or stable (full release)
+  # ================================================================
+  build-and-release:
+    if: github.event.action == 'testing-release' || github.event.action == 'stable-release'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.client_payload.version }}
+      IS_TESTING: ${{ github.event.action == 'testing-release' }}
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "$VERSION" ]; then
+            echo "Error: version is required in client_payload"
+            exit 1
+          fi
+          CHANNEL=$( [ "$IS_TESTING" = "true" ] && echo "testing" || echo "stable" )
+          echo "CHANNEL=${CHANNEL}" >> $GITHUB_ENV
+          echo "Building ${CHANNEL} release v${VERSION}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.client_payload.ref || 'main' }}
+          submodules: false
+
+      - name: Configure git credentials for submodules
+        if: env.USE_SUBMODULES == 'true'
+        run: |
+          git config --global url."https://${{ secrets.PLUGIN_PAT }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Checkout submodules
+        if: env.USE_SUBMODULES == 'true'
+        run: |
+          git submodule update --init --recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Download and setup Dalamud
+        env:
+          PAYLOAD_CHANNEL: ${{ github.event.client_payload.dalamud_channel }}
+        run: |
+          CHANNEL="${PAYLOAD_CHANNEL:-${{ env.DALAMUD_CHANNEL }}}"
+          if [ "$CHANNEL" = "stable" ]; then
+            URL="https://goatcorp.github.io/dalamud-distrib/latest.zip"
+          else
+            URL="https://goatcorp.github.io/dalamud-distrib/${CHANNEL}/latest.zip"
+          fi
+          echo "Downloading Dalamud from $URL..."
+          curl -fsSL "$URL" -o dalamud.zip
+          unzip -q dalamud.zip -d .dalamud
+          if [ ! -f ".dalamud/Dalamud.dll" ]; then
+            echo "Error: Dalamud download failed - Dalamud.dll not found"
+            exit 1
+          fi
+          echo "DALAMUD_HOME=$PWD/.dalamud/" >> $GITHUB_ENV
+
+      - name: Restore NuGet packages
+        run: |
+          dotnet restore /p:Configuration=Release --packages .nuget
+
+      - name: Build plugin
+        run: |
+          echo "Building ${{ env.PLUGIN_NAME }} v${VERSION} (${CHANNEL})..."
+          BUILD_ARGS="-c Release -f ${{ env.TARGET_FRAMEWORK }} -p:DalamudLibPath=$DALAMUD_HOME -p:Version=${VERSION} -maxcpucount:1 --source $PWD/.nuget --no-restore --verbosity minimal"
+          if [ "${{ env.STRIP_PDB }}" = "true" ]; then
+            BUILD_ARGS="$BUILD_ARGS -p:DebugType=none -p:DebugSymbols=false -p:CopyDebugSymbolFilesFromPackages=false -p:IncludeSymbols=false"
+          fi
+          dotnet build "${{ env.PROJECT_PATH }}" $BUILD_ARGS
+
+      - name: Resolve build output directory
+        run: |
+          PROJECT_DIR=$(dirname "${{ env.PROJECT_PATH }}")
+          if [ -n "${{ env.OUTPUT_DIR }}" ]; then
+            RESOLVED="${PROJECT_DIR}/${{ env.OUTPUT_DIR }}/${{ env.PLUGIN_NAME }}"
+          else
+            # Auto-detect: check dist/ first (custom DalamudPackager), then bin/Release/ (default)
+            if [ -d "${PROJECT_DIR}/dist/${{ env.PLUGIN_NAME }}" ]; then
+              RESOLVED="${PROJECT_DIR}/dist/${{ env.PLUGIN_NAME }}"
+            elif [ -d "${PROJECT_DIR}/bin/Release/${{ env.PLUGIN_NAME }}" ]; then
+              RESOLVED="${PROJECT_DIR}/bin/Release/${{ env.PLUGIN_NAME }}"
+            else
+              echo "Error: Could not find build output in dist/ or bin/Release/"
+              find "$PROJECT_DIR" -name "latest.zip" -type f 2>/dev/null || echo "No latest.zip found anywhere"
+              exit 1
+            fi
+          fi
+          echo "RESOLVED_DIST_DIR=${RESOLVED}" >> $GITHUB_ENV
+          echo "Build output directory: ${RESOLVED}"
+
+      - name: Strip debug symbols from zip
+        if: env.STRIP_PDB == 'true'
+        run: |
+          ZIP_PATH="${RESOLVED_DIST_DIR}/latest.zip"
+          if [ -f "$ZIP_PATH" ]; then
+            TEMP_DIR=$(mktemp -d)
+            unzip -q "$ZIP_PATH" -d "$TEMP_DIR"
+            find "$TEMP_DIR" -name "*.pdb" -type f -delete
+            cd "$TEMP_DIR"
+            zip -q -r "$OLDPWD/$ZIP_PATH" .
+            cd "$OLDPWD"
+            rm -rf "$TEMP_DIR"
+            if unzip -l "$ZIP_PATH" | grep -q "\.pdb$"; then
+              echo "Warning: .pdb files still present in zip!"
+            else
+              echo "Successfully stripped all debug symbols from latest.zip"
+            fi
+          fi
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release
+          cp "${RESOLVED_DIST_DIR}/latest.zip" "release/latest.zip"
+          if [ -f "${RESOLVED_DIST_DIR}/${{ env.PLUGIN_NAME }}.json" ]; then
+            cp "${RESOLVED_DIST_DIR}/${{ env.PLUGIN_NAME }}.json" "release/${{ env.PLUGIN_NAME }}.json"
+          fi
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG: ${{ github.event.client_payload.changelog }}
+        run: |
+          TAG="v${VERSION}"
+
+          # Refuse to overwrite an existing release (preserves download counts)
+          if gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.id' &>/dev/null; then
+            echo "::error::Release ${TAG} already exists. Cannot overwrite an existing release as this would reset download counts. Please use a higher version number."
+            exit 1
+          fi
+
+          # Determine if this version should be marked as Latest (stable only)
+          LATEST_FLAG=""
+          PRERELEASE_FLAG=""
+          if [ "$IS_TESTING" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          else
+            CURRENT_LATEST=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name // ""' 2>/dev/null || echo "")
+            if [ -n "$CURRENT_LATEST" ]; then
+              NEW_VER="${TAG#v}"; NEW_VER="${NEW_VER%%-*}"
+              CUR_VER="${CURRENT_LATEST#v}"; CUR_VER="${CUR_VER%%-*}"
+              IFS='.' read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VER"
+              IFS='.' read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$CUR_VER"
+              NEW_MAJOR=${NEW_MAJOR:-0}; NEW_MINOR=${NEW_MINOR:-0}; NEW_PATCH=${NEW_PATCH:-0}
+              CUR_MAJOR=${CUR_MAJOR:-0}; CUR_MINOR=${CUR_MINOR:-0}; CUR_PATCH=${CUR_PATCH:-0}
+              if [ "$NEW_MAJOR" -lt "$CUR_MAJOR" ] || \
+                 ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -lt "$CUR_MINOR" ]) || \
+                 ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -eq "$CUR_MINOR" ] && [ "$NEW_PATCH" -le "$CUR_PATCH" ]); then
+                LATEST_FLAG="--latest=false"
+                echo "Version $TAG is not higher than current latest $CURRENT_LATEST, will not mark as latest"
+              fi
+            fi
+          fi
+
+          NOTES="## ${{ env.PLUGIN_NAME }} v${VERSION}
+
+          ${CHANGELOG:+$CHANGELOG
+
+          }### Installation Files
+          - \`latest.zip\` - **Plugin archive for installation**
+          - \`${{ env.PLUGIN_NAME }}.json\` - Plugin manifest"
+
+          gh release create "$TAG" \
+            --title "${{ env.PLUGIN_NAME }} v${VERSION}" \
+            --notes "$NOTES" \
+            $PRERELEASE_FLAG \
+            --target "$(git rev-parse HEAD)" \
+            --repo ${{ github.repository }} \
+            $LATEST_FLAG \
+            release/latest.zip \
+            release/${{ env.PLUGIN_NAME }}.json
+
