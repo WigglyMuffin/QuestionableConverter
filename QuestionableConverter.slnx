@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.targets" />
+  </Folder>
+  <Project Path="LLib/LLib.csproj">
+    <Configuration Solution="*|*" Project="*|x64" />
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="QuestionableConverter/QuestionableConverter.csproj">
+    <Configuration Solution="*|*" Project="*|x64" />
+    <Platform Project="x64" />
+  </Project>
+</Solution>

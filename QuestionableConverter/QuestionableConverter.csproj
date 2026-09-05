@@ -1,0 +1,23 @@
+<Project Sdk="Dalamud.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <!-- Ships under the old internal name on purpose: Dalamud keys the install folder and the
+             update check on it, so this is the build every existing Questionable install updates to. -->
+        <AssemblyName>Questionable</AssemblyName>
+        <OutputPath>dist</OutputPath>
+        <PathMap Condition="$(SolutionDir) != ''">$(SolutionDir)=X:\</PathMap>
+        <Platforms>x64</Platforms>
+    </PropertyGroup>
+
+    <Import Project="..\LLib\LLib.targets" />
+    <Import Project="..\LLib\RenameZip.targets" />
+
+    <PropertyGroup Condition="'$(Configuration)'=='Release'">
+        <DebugType>none</DebugType>
+        <CopyDebugSymbolFilesFromPackages>false</CopyDebugSymbolFilesFromPackages>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\LLib\LLib.csproj" />
+    </ItemGroup>
+</Project>

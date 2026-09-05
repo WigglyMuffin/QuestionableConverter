@@ -1,0 +1,13 @@
+<Project>
+    <PropertyGroup>
+        <!-- Must stay above the last real Questionable release (7.5.13) so Dalamud offers this
+             build as an update to every existing install; nothing else ever ships under the
+             "Questionable" internal name again. -->
+        <Version>7.6.0</Version>
+        <IsTesting>false</IsTesting>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(IsTesting)' == 'true'">
+        <DefineConstants>$(DefineConstants);TESTING</DefineConstants>
+    </PropertyGroup>
+</Project>
