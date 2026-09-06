@@ -11,9 +11,10 @@ namespace QuestionableConverter;
 /// user that the plugin moved to the internal name "WigglyQuest", installs it on request, and points
 /// at the plugin installer to remove itself once WigglyQuest is running.
 ///
-/// Hard rules: never read or save a plugin config (this build shares pluginConfigs/Questionable.json
-/// with the file WigglyQuest copies on its first start), and register neither /qst nor any IPC gate
-/// (both belong to WigglyQuest once it is loaded).
+/// Hard rules: never save a plugin config (pluginConfigs/Questionable.json holds the user's
+/// Questionable settings, which the window copies to the WigglyQuest names on Install - an empty
+/// save here would become those settings), and register neither /qst nor any IPC gate (both belong
+/// to WigglyQuest once it is loaded).
 /// </summary>
 public sealed class ConverterPlugin : IDalamudPlugin
 {
@@ -44,7 +45,7 @@ public sealed class ConverterPlugin : IDalamudPlugin
 
         _reflector = new DalamudReflector(pluginInterface, framework, pluginLog);
         _installer = new PluginInstaller(_reflector, framework, pluginLog, pluginInterface);
-        _window = new ConverterWindow(pluginInterface, _installer);
+        _window = new ConverterWindow(pluginInterface, _installer, pluginLog);
         _windowSystem.AddWindow(_window);
 
         _pluginInterface.UiBuilder.Draw += _windowSystem.Draw;
