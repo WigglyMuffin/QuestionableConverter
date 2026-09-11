@@ -2,7 +2,7 @@
   "Name": "Questionable (moved to WigglyQuest)",
   "Author": "WigglyMuffin, CryoTechnic",
   "Punchline": "Questionable has moved to WigglyQuest - this build installs it for you.",
-  "Description": "Questionable now ships as \"WigglyQuest\". Its internal name changed so it no longer shares Dalamud's install and config folders with the PunishXIV fork of Questionable; the plugin you see in the installer is still called Questionable.\n\nThis final build under the old name does no questing. It opens a short guide, installs WigglyQuest from the same repository with one click, and then points you at the plugin installer to remove itself. WigglyQuest copies your settings and local quest files on its first start.\n\nOriginally created by Liza Carvelli.",
+  "Description": "Questionable now ships as \"WigglyQuest\". Its internal name changed so it no longer shares Dalamud's install and config folders with the PunishXIV fork of Questionable; the plugin you see in the installer is still called Questionable.\n\nThis final build under the old name does no questing. It opens a short guide, installs WigglyQuest from the same repository with one click, and then points you at the plugin installer to remove itself. WigglyQuest copies your settings and local quest files on its first start.",
   "RepoUrl": "https://github.com/WigglyMuffin/QuestionableConverter",
   "IconUrl": "https://raw.githubusercontent.com/WigglyMuffin/DalamudPlugins/main/icons/Questionable.png",
   "InternalName": "Questionable",
