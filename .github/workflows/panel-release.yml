@@ -105,13 +105,8 @@ jobs:
           if [ -n "$CURRENT_LATEST" ]; then
             NEW_VER="${TAG#v}"; NEW_VER="${NEW_VER%%-*}"
             CUR_VER="${CURRENT_LATEST#v}"; CUR_VER="${CUR_VER%%-*}"
-            IFS='.' read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VER"
-            IFS='.' read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$CUR_VER"
-            NEW_MAJOR=${NEW_MAJOR:-0}; NEW_MINOR=${NEW_MINOR:-0}; NEW_PATCH=${NEW_PATCH:-0}
-            CUR_MAJOR=${CUR_MAJOR:-0}; CUR_MINOR=${CUR_MINOR:-0}; CUR_PATCH=${CUR_PATCH:-0}
-            if [ "$NEW_MAJOR" -lt "$CUR_MAJOR" ] || \
-               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -lt "$CUR_MINOR" ]) || \
-               ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -eq "$CUR_MINOR" ] && [ "$NEW_PATCH" -le "$CUR_PATCH" ]); then
+            # sort -V orders every part: x.y.z < x.y.z.n < x.y.(z+1)
+            if [ "$NEW_VER" = "$CUR_VER" ] || [ "$(printf '%s\n' "$CUR_VER" "$NEW_VER" | sort -V | tail -n1)" != "$NEW_VER" ]; then
               LATEST_FLAG="--latest=false"
               echo "Version $TAG is not higher than current latest $CURRENT_LATEST, will not mark as latest"
             fi
@@ -291,13 +286,8 @@ jobs:
             if [ -n "$CURRENT_LATEST" ]; then
               NEW_VER="${TAG#v}"; NEW_VER="${NEW_VER%%-*}"
               CUR_VER="${CURRENT_LATEST#v}"; CUR_VER="${CUR_VER%%-*}"
-              IFS='.' read -r NEW_MAJOR NEW_MINOR NEW_PATCH <<< "$NEW_VER"
-              IFS='.' read -r CUR_MAJOR CUR_MINOR CUR_PATCH <<< "$CUR_VER"
-              NEW_MAJOR=${NEW_MAJOR:-0}; NEW_MINOR=${NEW_MINOR:-0}; NEW_PATCH=${NEW_PATCH:-0}
-              CUR_MAJOR=${CUR_MAJOR:-0}; CUR_MINOR=${CUR_MINOR:-0}; CUR_PATCH=${CUR_PATCH:-0}
-              if [ "$NEW_MAJOR" -lt "$CUR_MAJOR" ] || \
-                 ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -lt "$CUR_MINOR" ]) || \
-                 ([ "$NEW_MAJOR" -eq "$CUR_MAJOR" ] && [ "$NEW_MINOR" -eq "$CUR_MINOR" ] && [ "$NEW_PATCH" -le "$CUR_PATCH" ]); then
+              # sort -V orders every part: x.y.z < x.y.z.n < x.y.(z+1)
+              if [ "$NEW_VER" = "$CUR_VER" ] || [ "$(printf '%s\n' "$CUR_VER" "$NEW_VER" | sort -V | tail -n1)" != "$NEW_VER" ]; then
                 LATEST_FLAG="--latest=false"
                 echo "Version $TAG is not higher than current latest $CURRENT_LATEST, will not mark as latest"
               fi
