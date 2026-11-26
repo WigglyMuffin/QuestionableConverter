@@ -55,7 +55,7 @@ internal sealed class ConverterWindow : LWindow
 
         Wrapped("Questionable now ships under the internal name \"WigglyQuest\". The name changed so it no " +
                 "longer shares Dalamud's install and config folders with the PunishXIV fork of Questionable. " +
-                "In the plugin installer the new plugin is still called Questionable.");
+                "In the plugin installer it is listed as WigglyQuest.");
         Wrapped("This build does no questing. It only helps you switch.");
         ImGui.Separator();
 
